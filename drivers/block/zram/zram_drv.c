@@ -68,6 +68,30 @@ static int zram_major;
 static struct zram *zram_devices;
 static const char *default_compressor = "lz4";
 
+/*
+ * Boot-time overrides from the kernel command line:
+ *   zram.comp=<algo>      compressor for new devices (default: lz4)
+ *   zram.disksize_mb=<n>  force disksize to n MiB (-1 = normal, 0 = swapoff/no swap)
+ */
+static char zram_cmdline_comp[CRYPTO_MAX_ALG_NAME];
+module_param_string(comp, zram_cmdline_comp, sizeof(zram_cmdline_comp), 0444);
+MODULE_PARM_DESC(comp, "Compression algorithm for new zram devices");
+
+static long zram_cmdline_disksize_mb = -1;
+module_param_named(disksize_mb, zram_cmdline_disksize_mb, long, 0444);
+MODULE_PARM_DESC(disksize_mb, "Force zram disksize in MiB (-1 = normal, 0 = swapoff)");
+
+static const char *zram_default_comp(void)
+{
+	if (zram_cmdline_comp[0]) {
+		if (zcomp_available_algorithm(zram_cmdline_comp))
+			return zram_cmdline_comp;
+		pr_warn("zram.comp=%s not available, using %s\n",
+			zram_cmdline_comp, default_compressor);
+	}
+	return default_compressor;
+}
+
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
 /*
@@ -3107,6 +3131,20 @@ static ssize_t disksize_store(struct device *dev,
 	if (!disksize)
 		return -EINVAL;
 
+	if (zram_cmdline_disksize_mb == 0) {
+		pr_info("zram disabled by zram.disksize_mb=0 (swapoff)\n");
+		return -EINVAL;
+	}
+
+	if (zram_cmdline_disksize_mb > 0) {
+		u64 forced = (u64)zram_cmdline_disksize_mb << 20;
+
+		if (forced != disksize)
+			pr_info("disksize %llu overridden by zram.disksize_mb=%ld\n",
+				disksize, zram_cmdline_disksize_mb);
+		disksize = forced;
+	}
+
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
 		pr_info("Cannot change disksize for initialized device\n");
@@ -3357,7 +3395,7 @@ static int zram_add(void)
 	disk_to_dev(zram->disk)->groups = zram_disk_attr_groups;
 	add_disk(zram->disk);
 
-	strlcpy(zram->compressor, default_compressor, sizeof(zram->compressor));
+	strlcpy(zram->compressor, zram_default_comp(), sizeof(zram->compressor));
 
 	zram_debugfs_register(zram);
 
@@ -3616,6 +3654,15 @@ static int __init zram_init(void)
 		class_unregister(&zram_control_class);
 		cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
 		return -EBUSY;
+	}
+
+	if (zram_cmdline_disksize_mb >
+	    (long)(totalram_pages >> (20 - PAGE_SHIFT))) {
+		pr_warn("zram.disksize_mb=%ld exceeds RAM, ignoring\n",
+			zram_cmdline_disksize_mb);
+		zram_cmdline_disksize_mb = -1;
+	} else if (zram_cmdline_disksize_mb < -1) {
+		zram_cmdline_disksize_mb = -1;
 	}
 
 	while (num_devices != 0) {
