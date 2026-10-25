@@ -26,6 +26,12 @@ void mtk_common_pm_mfg_idle(void);
 int mtk_common_gpufreq_commit(int opp_idx);
 int mtk_common_ged_dvfs_get_last_commit_idx(void);
 
+/*
+ * Hook for mtk_get_gpu_memory_usage() in mtk_gpu_utility.c. Returns the
+ * total GPU memory currently allocated by kbase, in bytes.
+ */
+extern unsigned int (*mtk_get_gpu_memory_usage_fp)(void);
+
 int mtk_common_device_init(struct kbase_device *kbdev);
 void mtk_common_device_term(struct kbase_device *kbdev);
 

@@ -22,9 +22,7 @@
 #include <ged_dvfs.h>
 #if IS_ENABLED(CONFIG_PROC_FS)
 #include <linux/proc_fs.h>
-#if IS_ENABLED(CONFIG_MTK_GPU_MEM_TRACK)
 #include <device/mali_kbase_device.h>
-#endif
 #endif
 
 static bool mfg_powered;
@@ -109,7 +107,6 @@ DEFINE_SHOW_ATTRIBUTE(mtk_common_gpu_utilization);
 
 static int mtk_common_gpu_memory_show(struct seq_file *m, void *v)
 {
-#if IS_ENABLED(CONFIG_MTK_GPU_MEM_TRACK)
 	struct list_head *entry;
 	const struct list_head *kbdev_list;
 
@@ -137,9 +134,6 @@ static int mtk_common_gpu_memory_show(struct seq_file *m, void *v)
 		mutex_unlock(&kbdev->kctx_list_lock);
 	}
 	kbase_device_put_list(kbdev_list);
-#else
-	seq_puts(m, "GPU mem_profile doesn't be enabled\n");
-#endif
 
 	return 0;
 }
@@ -164,6 +158,19 @@ void mtk_common_procfs_exit(void)
 	remove_proc_entry("mtk_mali", NULL);
 }
 #endif
+
+static unsigned int mtk_common_report_gpu_memory_usage(void)
+{
+	struct kbase_device *kbdev = mtk_common_get_kbdev();
+	u64 bytes;
+
+	if (!kbdev)
+		return 0;
+
+	bytes = (u64)atomic_read(&kbdev->memdev.used_pages) << PAGE_SHIFT;
+
+	return (unsigned int)min_t(u64, bytes, UINT_MAX);
+}
 
 int mtk_common_device_init(struct kbase_device *kbdev)
 {
@@ -193,6 +200,8 @@ int mtk_common_device_init(struct kbase_device *kbdev)
 	ged_dvfs_gpu_freq_commit_fp = mtk_common_ged_dvfs_commit;
 #endif
 
+	mtk_get_gpu_memory_usage_fp = mtk_common_report_gpu_memory_usage;
+
 	mtk_mfg_counter_init();
 
 	return 0;
@@ -219,6 +228,8 @@ void mtk_common_device_term(struct kbase_device *kbdev)
 #endif
 	ged_dvfs_gpu_freq_commit_fp = NULL;
 #endif
+
+	mtk_get_gpu_memory_usage_fp = NULL;
 
 	mtk_mfg_counter_destroy();
 }
