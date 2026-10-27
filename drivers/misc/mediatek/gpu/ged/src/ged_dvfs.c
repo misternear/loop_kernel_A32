@@ -894,7 +894,7 @@ GED_ERROR ged_dvfs_um_commit(unsigned long gpu_tar_freq, bool bFallback)
 		for (i = 0; i <= i32MaxLevel; i++) {
 			gpu_freq = mt_gpufreq_get_freq_by_idx(i);
 
-			if (gpu_tar_freq > gpu_freq) {
+			if (gpu_tar_freq >= gpu_freq) {
 				if (i == 0)
 					ui32NewFreqID = 0;
 				else
@@ -1176,7 +1176,7 @@ static int ged_dvfs_fb_gpu_dvfs(int t_gpu, int t_gpu_target,
 
 		gpu_freq = mt_gpufreq_get_freq_by_idx(i);
 
-		if (gpu_freq_tar > gpu_freq) {
+		if (gpu_freq_tar >= gpu_freq) {
 			if (i == 0)
 				ui32NewFreqID = 0;
 			else
@@ -2413,4 +2413,16 @@ module_param(gpu_cust_upbound_freq, uint, 0644);
 module_param(g_gpu_timer_based_emu, uint, 0644);
 module_param(gpu_bw_err_debug, uint, 0644);
 #endif
+
+void ged_dvfs_notify_freq_table_update(void)
+{
+	mutex_lock(&gsDVFSLock);
+	if (loading_ud_table)
+		_init_loading_ud_table();
+	gpu_bottom_freq = mt_gpufreq_get_freq_by_idx(g_bottom_freq_id);
+	gpu_cust_boost_freq = mt_gpufreq_get_freq_by_idx(g_cust_boost_freq_id);
+	gpu_cust_upbound_freq = mt_gpufreq_get_freq_by_idx(g_cust_upbound_freq_id);
+	mutex_unlock(&gsDVFSLock);
+}
+EXPORT_SYMBOL(ged_dvfs_notify_freq_table_update);
 

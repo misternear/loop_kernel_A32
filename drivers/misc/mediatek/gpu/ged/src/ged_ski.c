@@ -120,9 +120,25 @@ static ssize_t gpu_max_clock_store(struct kobject *kobj,
 				table_num = mt_gpufreq_get_dvfs_table_num();
 				max_opp_idx = mt_gpufreq_get_seg_max_opp_index();
 
+				if (!power_table || table_num == 0)
+					return -EINVAL;
+
+				if (max_freq >= power_table[max_opp_idx].gpufreq_khz ||
+				    max_freq >= mt_gpufreq_get_default_freq_by_idx(0)) {
+					mtk_custom_upbound_gpu_freq(0);
+					return count;
+				}
+
+				if (max_freq <= power_table[max_opp_idx + table_num - 1].gpufreq_khz) {
+					mtk_custom_upbound_gpu_freq(table_num - 1);
+					return count;
+				}
+
 				for (idx = max_opp_idx; index_count < table_num; index_count++) {
-					if (max_freq ==
-					    power_table[idx + index_count].gpufreq_khz) {
+					unsigned int cur_f = power_table[idx + index_count].gpufreq_khz;
+					unsigned int def_f = mt_gpufreq_get_default_freq_by_idx(index_count);
+
+					if (max_freq >= cur_f || (def_f && max_freq >= def_f)) {
 						mtk_custom_upbound_gpu_freq(index_count);
 						return count;
 					}
@@ -159,7 +175,6 @@ static ssize_t gpu_min_clock_store(struct kobject *kobj,
 	struct mt_gpufreq_power_table_info *power_table = NULL;
 	unsigned int table_num = 0;
 	unsigned int max_opp_idx = 0;
-	int idx = 0;
 	int index_count = 0;
 
 	char acBuffer[GED_SYSFS_MAX_BUFF_SIZE];
@@ -174,9 +189,25 @@ static ssize_t gpu_min_clock_store(struct kobject *kobj,
 				table_num = mt_gpufreq_get_dvfs_table_num();
 				max_opp_idx = mt_gpufreq_get_seg_max_opp_index();
 
-				for (idx = max_opp_idx; index_count < table_num; index_count++) {
-					if (min_freq ==
-					    power_table[idx + index_count].gpufreq_khz) {
+				if (!power_table || table_num == 0)
+					return -EINVAL;
+
+				if (min_freq <= power_table[max_opp_idx + table_num - 1].gpufreq_khz) {
+					mtk_custom_boost_gpu_freq(table_num - 1);
+					return count;
+				}
+
+				if (min_freq >= power_table[max_opp_idx].gpufreq_khz ||
+				    min_freq >= mt_gpufreq_get_default_freq_by_idx(0)) {
+					mtk_custom_boost_gpu_freq(0);
+					return count;
+				}
+
+				for (index_count = table_num - 1; index_count >= 0; index_count--) {
+					unsigned int cur_f = power_table[max_opp_idx + index_count].gpufreq_khz;
+					unsigned int def_f = mt_gpufreq_get_default_freq_by_idx(index_count);
+
+					if (min_freq <= cur_f || (def_f && min_freq <= def_f)) {
 						mtk_custom_boost_gpu_freq(index_count);
 						return count;
 					}

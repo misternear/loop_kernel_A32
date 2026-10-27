@@ -107,6 +107,10 @@
 #define DELAY_FACTOR		(625)
 #define BUCK_DIFF_MAX		(25000)		/* mV x 100 */
 #define BUCK_DIFF_MIN		(10000)		/* mV x 100 */
+
+#define VSRAM_VGPU_DIFF_BASE	(10000)		/* mV x 100 */
+#define VSRAM_OFFSET_MIN_MV	(-100)
+#define VSRAM_OFFSET_MAX_MV	(50)
 #define NUM_OF_OPP_IDX		(32)
 
 /**************************************************
@@ -223,6 +227,8 @@ static const struct file_operations mt_ ## name ## _proc_fops =	\
  * Operation Definition
  **************************************************/
 #define VOLT_NORMALIZATION(volt)		((volt % 625) ? (volt - (volt % 625) + 625) : volt)
+#define GPU_VOLT_OFFSET_MAX_MV		(50)
+#define GPU_VOLT_OFFSET_MIN_MV		(-150)
 #ifndef MIN
 #define MIN(x, y)						(((x) < (y)) ? (x) : (y))
 #endif

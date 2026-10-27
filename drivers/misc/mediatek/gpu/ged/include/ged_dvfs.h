@@ -224,4 +224,7 @@ extern void ged_get_gpu_utli_ex(struct GpuUtilization_Ex *util_ex);
 #endif
 
 extern unsigned int ged_log_perf_trace_enable;
+
+void ged_dvfs_notify_freq_table_update(void);
+
 #endif

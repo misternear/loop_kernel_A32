@@ -106,6 +106,11 @@ unsigned int mt_gpufreq_get_freq_by_idx(unsigned int idx)
 	return 0;
 }
 
+unsigned int mt_gpufreq_get_default_freq_by_idx(unsigned int idx)
+{
+	return 0;
+}
+
 unsigned int mt_gpufreq_get_volt_by_idx(unsigned int idx)
 {
 	return 0;

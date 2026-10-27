@@ -90,6 +90,10 @@ static void __mt_gpufreq_volt_switch(unsigned int volt_old, unsigned int volt_ne
 static void __mt_gpufreq_volt_switch_without_vsram_volt(unsigned int volt_old, unsigned int volt_new);
 static void __mt_gpufreq_update_aging(bool apply_aging_setting);
 static void __mt_gpufreq_apply_volt_offset(int offset_mv);
+
+int gpufreq_set_volt_offset(int mv);
+int gpufreq_set_freq_offset(int mhz);
+int gpufreq_set_vsram_offset(int mv);
 static void __mt_gpufreq_resync_power_table(void);
 
 #ifdef MT_GPUFREQ_BATT_OC_PROTECT
@@ -211,6 +215,8 @@ static unsigned int g_cur_opp_idx;
 static unsigned int g_keep_opp_freq_idx;
 static unsigned int g_fixed_vsram_volt;
 static unsigned int g_fixed_vsram_volt_threshold;
+/* VSRAM = VGPU + VSRAM_VGPU_DIFF_BASE + this, in mV */
+static int g_vsram_offset_mv;
 static unsigned int g_fixed_freq;
 static unsigned int g_fixed_volt;
 static unsigned int g_max_limited_idx;
@@ -258,19 +264,12 @@ GED_LOG_BUF_HANDLE _mtk_gpu_log_hnd;
 
 #include "ged_log.h"
 #include "ged_base.h"
+#include "ged_dvfs.h"
 extern GED_LOG_BUF_HANDLE gpufreq_ged_log;
 
 static int g_clock_on;
 static int g_freq_offset_mhz = 0;
 static int g_volt_offset_mv = 0;
-
-/*
- * VGPU_MAX_VOLT is defined in mtk_gpufreq_core.h as SEG_GPU_DVFS_VOLT0,
- * i.e. it IS the stock top OPP voltage with zero margin. Bounding the
- * offset against it rejects every positive value, not just unsafe ones.
- */
-#define GPU_VOLT_OFFSET_MAX_MV		(50)
-#define GPU_VOLT_OFFSET_MIN_MV		(-150)
 
 /**
  * ===============================================
@@ -630,7 +629,7 @@ void mt_gpufreq_restore_default_volt(void)
 		g_opp_table[i].gpufreq_volt =
 		g_opp_table_default[i].gpufreq_volt;
 		g_opp_table[i].gpufreq_vsram =
-		g_opp_table_default[i].gpufreq_vsram;
+		__mt_gpufreq_get_vsram_by_target_volt(g_opp_table[i].gpufreq_volt);
 
 		gpufreq_pr_debug("@%s: g_opp_table[%d].gpufreq_volt = %d, gpufreq_vsram = %d\n",
 						 __func__, i,
@@ -746,11 +745,22 @@ unsigned int mt_gpufreq_get_real_dvfs_table_num(void)
 unsigned int mt_gpufreq_get_freq_by_idx(unsigned int idx)
 {
 	idx += g_segment_max_opp_idx;
-	if (idx < g_max_opp_idx_num)
-		return g_opp_table[idx].gpufreq_khz;
-	else
+	if (idx >= g_max_opp_idx_num)
 		return 0;
+
+	return g_opp_table[idx].gpufreq_khz;
 }
+EXPORT_SYMBOL(mt_gpufreq_get_freq_by_idx);
+
+unsigned int mt_gpufreq_get_default_freq_by_idx(unsigned int idx)
+{
+	idx += g_segment_max_opp_idx;
+	if (!g_opp_table_default || idx >= g_max_opp_idx_num)
+		return 0;
+
+	return g_opp_table_default[idx].gpufreq_khz;
+}
+EXPORT_SYMBOL(mt_gpufreq_get_default_freq_by_idx);
 
 /* API : get frequency via OPP table real index */
 unsigned int mt_gpufreq_get_freq_by_real_idx(unsigned int idx)
@@ -1560,6 +1570,58 @@ static ssize_t mt_gpufreq_fixed_freq_volt_proc_write(struct file *file,
 /*
  * PROCFS : GPU frequency offset
  */
+static int __mt_gpufreq_set_freq_offset(int value)
+{
+	int i;
+	int max_orig_idx;
+	int start_idx;
+	int new_top_f;
+	int new_bot_f;
+	int num;
+	int steps;
+
+	if (!g_opp_table || !g_opp_table_default || !g_max_opp_idx_num)
+		return -EAGAIN;
+
+	start_idx    = g_segment_max_opp_idx;
+	max_orig_idx = g_max_opp_idx_num - 1;
+	new_top_f    = g_opp_table_default[start_idx].gpufreq_khz + (value * 1000);
+	new_bot_f    = g_opp_table_default[max_orig_idx].gpufreq_khz;
+
+	if (new_top_f <= new_bot_f) {
+		gpufreq_pr_info(
+			"@%s: freq offset %d MHz would invert OPP table, rejected\n",
+			__func__, value);
+		return -EINVAL;
+	}
+
+	mutex_lock(&mt_gpufreq_lock);
+	g_freq_offset_mhz = value;
+
+	num   = new_top_f - new_bot_f;
+	steps = max_orig_idx - start_idx;
+
+	for (i = start_idx; i <= max_orig_idx; i++) {
+		int step_idx = i - start_idx;
+		int offset = (steps > 0) ? ((num * step_idx) / steps) : 0;
+
+		g_opp_table[i].gpufreq_khz = new_top_f - offset;
+	}
+
+	for (i = 0; i < start_idx; i++)
+		g_opp_table[i].gpufreq_khz =
+		g_opp_table_default[i].gpufreq_khz + (value * 1000);
+
+	__mt_gpufreq_cal_sb_opp_index();
+	__mt_gpufreq_resync_power_table();
+
+	mutex_unlock(&mt_gpufreq_lock);
+
+	mt_gpufreq_target(g_cur_opp_idx, true);
+	ged_dvfs_notify_freq_table_update();
+	return 0;
+}
+
 static int mt_gpufreq_freq_offset_proc_show(struct seq_file *m, void *v)
 {
 	seq_printf(m, "GPU freq_offset_mhz = %d\n", g_freq_offset_mhz);
@@ -1581,66 +1643,34 @@ static ssize_t mt_gpufreq_freq_offset_proc_write(struct file *file,
 
 	buf[len] = '\0';
 
-	if (kstrtoint(buf, 10, &value) == 0) {
-		int i;
-		int max_orig_idx;
-		int start_idx;
-		int new_top_f;
-		int new_bot_f;
-		int num;
-		int steps;
-
-		start_idx    = g_segment_max_opp_idx;
-		max_orig_idx = g_max_opp_idx_num - 1;
-		new_top_f    = g_opp_table_default[start_idx].gpufreq_khz + (value * 1000);
-		new_bot_f    = g_opp_table_default[max_orig_idx].gpufreq_khz;
-
-		/*
-		 * Bounds check: reject if offset inverts the table (new_top_f would
-		 * fall at or below the stock bottom OPP) or goes negative.
-		 */
-		if (new_top_f <= new_bot_f) {
-			gpufreq_pr_debug(
-				"@%s: freq offset %d MHz would invert OPP table, rejected\n",
-				__func__, value);
-			goto out;
-		}
-
-		mutex_lock(&mt_gpufreq_lock);
-		g_freq_offset_mhz = value;
-
-		num   = new_top_f - new_bot_f;
-		steps = max_orig_idx - start_idx;
-
-		/* Interpolate visible OPPs from start_idx down to bottom */
-		for (i = start_idx; i <= max_orig_idx; i++) {
-			int step_idx = i - start_idx;
-			int offset = (steps > 0) ? ((num * step_idx) / steps) : 0;
-			g_opp_table[i].gpufreq_khz = new_top_f - offset;
-		}
-
-		/* Offset hidden OPPs above start_idx by the same amount */
-		for (i = 0; i < start_idx; i++)
-			g_opp_table[i].gpufreq_khz =
-			g_opp_table_default[i].gpufreq_khz + (value * 1000);
-
-		/*
-		 * Bug fix: cal_sb builds the springboard transition table that
-		 * pairs frequencies with safe voltage step sequences. Changing
-		 * frequencies without rebuilding it leaves stale pairings that
-		 * can cause wrong voltage sequencing on OPP switches.
-		 */
-		__mt_gpufreq_cal_sb_opp_index();
-		__mt_gpufreq_resync_power_table();
-
-		mutex_unlock(&mt_gpufreq_lock);
-
-		mt_gpufreq_target(g_cur_opp_idx, true);
-		ret = 0;
-	}
+	if (kstrtoint(buf, 10, &value) == 0)
+		ret = __mt_gpufreq_set_freq_offset(value);
 
 	out:
 	return (ret < 0) ? ret : count;
+}
+
+static int __mt_gpufreq_set_volt_offset(int value)
+{
+	if (!g_opp_table || !g_opp_table_default || !g_max_opp_idx_num)
+		return -EAGAIN;
+
+	if (value > GPU_VOLT_OFFSET_MAX_MV || value < GPU_VOLT_OFFSET_MIN_MV) {
+		gpufreq_pr_info(
+			"@%s: volt offset %d mV outside allowed range [%d, %d] mV, rejected\n",
+			__func__, value, GPU_VOLT_OFFSET_MIN_MV, GPU_VOLT_OFFSET_MAX_MV);
+		return -EINVAL;
+	}
+
+	mutex_lock(&mt_gpufreq_lock);
+	g_volt_offset_mv = value;
+	__mt_gpufreq_apply_volt_offset(value);
+	__mt_gpufreq_cal_sb_opp_index();
+	__mt_gpufreq_resync_power_table();
+	mutex_unlock(&mt_gpufreq_lock);
+
+	mt_gpufreq_target(g_cur_opp_idx, true);
+	return 0;
 }
 
 static int mt_gpufreq_volt_offset_proc_show(struct seq_file *m, void *v)
@@ -1664,26 +1694,185 @@ static ssize_t mt_gpufreq_volt_offset_proc_write(struct file *file,
 
 	buf[len] = '\0';
 
-	if (kstrtoint(buf, 10, &value) == 0) {
-		/* Bounds check: keep the offset within a sane tunable range */
-		if (value > GPU_VOLT_OFFSET_MAX_MV || value < GPU_VOLT_OFFSET_MIN_MV) {
-			gpufreq_pr_info(
-				"@%s: volt offset %d mV outside allowed range [%d, %d] mV, rejected\n",
-				__func__, value, GPU_VOLT_OFFSET_MIN_MV, GPU_VOLT_OFFSET_MAX_MV);
-			goto out;
-		}
-		mutex_lock(&mt_gpufreq_lock);
-		g_volt_offset_mv = value;
-		__mt_gpufreq_apply_volt_offset(value);
-		__mt_gpufreq_cal_sb_opp_index();
-		__mt_gpufreq_resync_power_table();
-		mutex_unlock(&mt_gpufreq_lock);
-
-		mt_gpufreq_target(g_cur_opp_idx, true);
-		ret = 0;
-	}
+	if (kstrtoint(buf, 10, &value) == 0)
+		ret = __mt_gpufreq_set_volt_offset(value);
 
 	out:
+	return (ret < 0) ? ret : count;
+}
+
+static bool g_gpufreq_ready;
+static bool g_boot_volt_pending;
+static bool g_boot_freq_pending;
+static bool g_boot_vsram_pending;
+static int g_boot_volt_mv;
+static int g_boot_freq_mhz;
+static int g_boot_vsram_mv;
+
+int gpufreq_set_volt_offset(int mv)
+{
+	if (mv > GPU_VOLT_OFFSET_MAX_MV || mv < GPU_VOLT_OFFSET_MIN_MV) {
+		gpufreq_pr_info(
+			"@%s: volt offset %d mV outside allowed range [%d, %d] mV, rejected\n",
+			__func__, mv, GPU_VOLT_OFFSET_MIN_MV, GPU_VOLT_OFFSET_MAX_MV);
+		return -EINVAL;
+	}
+
+	if (!g_gpufreq_ready) {
+		g_boot_volt_mv = mv;
+		g_boot_volt_pending = true;
+		return 0;
+	}
+
+	if (mv == 0 && g_volt_offset_mv == 0)
+		return 0;
+
+	return __mt_gpufreq_set_volt_offset(mv);
+}
+EXPORT_SYMBOL(gpufreq_set_volt_offset);
+
+int gpufreq_set_freq_offset(int mhz)
+{
+	if (!g_gpufreq_ready) {
+		g_boot_freq_mhz = mhz;
+		g_boot_freq_pending = true;
+		return 0;
+	}
+
+	if (mhz == 0 && g_freq_offset_mhz == 0)
+		return 0;
+
+	return __mt_gpufreq_set_freq_offset(mhz);
+}
+EXPORT_SYMBOL(gpufreq_set_freq_offset);
+
+static void __mt_gpufreq_apply_boot_offsets(void)
+{
+	int ret;
+
+	g_gpufreq_ready = true;
+
+	if (g_boot_freq_pending) {
+		g_boot_freq_pending = false;
+		ret = gpufreq_set_freq_offset(g_boot_freq_mhz);
+		if (ret)
+			gpufreq_pr_err("@%s: boot freq offset %d MHz failed (%d)\n",
+				       __func__, g_boot_freq_mhz, ret);
+	}
+
+	if (g_boot_volt_pending) {
+		g_boot_volt_pending = false;
+		ret = gpufreq_set_volt_offset(g_boot_volt_mv);
+		if (ret)
+			gpufreq_pr_err("@%s: boot volt offset %d mV failed (%d)\n",
+				       __func__, g_boot_volt_mv, ret);
+	}
+
+	if (g_boot_vsram_pending) {
+		g_boot_vsram_pending = false;
+		ret = gpufreq_set_vsram_offset(g_boot_vsram_mv);
+		if (ret)
+			gpufreq_pr_err("@%s: boot vsram offset %d mV failed (%d)\n",
+				       __func__, g_boot_vsram_mv, ret);
+	}
+}
+
+static int __mt_gpufreq_set_vsram_offset(int offset_mv)
+{
+	int i;
+	unsigned int old_vsram, new_vsram;
+
+	if (offset_mv < VSRAM_OFFSET_MIN_MV || offset_mv > VSRAM_OFFSET_MAX_MV) {
+		gpufreq_pr_info(
+			"@%s: vsram offset %d mV outside allowed range [%d, %d] mV, rejected\n",
+			__func__, offset_mv, VSRAM_OFFSET_MIN_MV,
+			VSRAM_OFFSET_MAX_MV);
+		return -EINVAL;
+	}
+
+	mutex_lock(&mt_gpufreq_lock);
+
+	g_vsram_offset_mv = offset_mv;
+
+	for (i = 0; i < g_max_opp_idx_num; i++) {
+		g_opp_table[i].gpufreq_vsram =
+		__mt_gpufreq_get_vsram_by_target_volt(g_opp_table[i].gpufreq_volt);
+		g_opp_table_default[i].gpufreq_vsram =
+		__mt_gpufreq_get_vsram_by_target_volt(g_opp_table_default[i].gpufreq_volt);
+	}
+
+	__mt_gpufreq_cal_sb_opp_index();
+	__mt_gpufreq_resync_power_table();
+
+	if (g_volt_enable_state) {
+		old_vsram = g_cur_opp_vsram_volt;
+		new_vsram = g_opp_table[g_cur_opp_idx].gpufreq_vsram;
+
+		if (new_vsram > old_vsram)
+			__mt_gpufreq_vsram_gpu_volt_switch(VOLT_RISING,
+				g_vsram_sfchg_rrate, old_vsram, new_vsram);
+		else if (new_vsram < old_vsram)
+			__mt_gpufreq_vsram_gpu_volt_switch(VOLT_FALLING,
+				g_vsram_sfchg_frate, old_vsram, new_vsram);
+
+		g_cur_opp_vsram_volt = new_vsram;
+	}
+
+	mutex_unlock(&mt_gpufreq_lock);
+
+	return 0;
+}
+
+int gpufreq_set_vsram_offset(int mv)
+{
+	if (mv < VSRAM_OFFSET_MIN_MV || mv > VSRAM_OFFSET_MAX_MV) {
+		gpufreq_pr_info(
+			"@%s: vsram offset %d mV outside allowed range [%d, %d] mV, rejected\n",
+			__func__, mv, VSRAM_OFFSET_MIN_MV, VSRAM_OFFSET_MAX_MV);
+		return -EINVAL;
+	}
+
+	if (!g_gpufreq_ready) {
+		g_boot_vsram_mv = mv;
+		g_boot_vsram_pending = true;
+		return 0;
+	}
+
+	if (mv == 0 && g_vsram_offset_mv == 0)
+		return 0;
+
+	return __mt_gpufreq_set_vsram_offset(mv);
+}
+EXPORT_SYMBOL(gpufreq_set_vsram_offset);
+
+/*
+ * PROCFS : VSRAM offset
+ */
+static int mt_gpufreq_vsram_offset_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "GPU vsram_offset_mv = %d\n", g_vsram_offset_mv);
+	return 0;
+}
+
+static ssize_t mt_gpufreq_vsram_offset_proc_write(struct file *file,
+		const char __user *buffer, size_t count, loff_t *pos)
+{
+	char buf[64];
+	unsigned int len = 0;
+	int value = 0;
+	int ret = -EFAULT;
+
+	len = (count < (sizeof(buf) - 1)) ? count : (sizeof(buf) - 1);
+
+	if (copy_from_user(buf, buffer, len))
+		goto out;
+
+	buf[len] = '\0';
+
+	if (kstrtoint(buf, 10, &value) == 0)
+		ret = __mt_gpufreq_set_vsram_offset(value);
+
+out:
 	return (ret < 0) ? ret : count;
 }
 
@@ -1692,6 +1881,7 @@ static ssize_t mt_gpufreq_volt_offset_proc_write(struct file *file,
  */
 PROC_FOPS_RW(gpufreq_freq_offset);
 PROC_FOPS_RW(gpufreq_volt_offset);
+PROC_FOPS_RW(gpufreq_vsram_offset);
 PROC_FOPS_RW(gpufreq_opp_stress_test);
 PROC_FOPS_RW(gpufreq_power_limited);
 PROC_FOPS_RO(gpufreq_opp_dump);
@@ -1723,6 +1913,7 @@ static int __mt_gpufreq_create_procfs(void)
 		PROC_ENTRY(gpufreq_aging_test),
 		PROC_ENTRY(gpufreq_freq_offset),
 		PROC_ENTRY(gpufreq_volt_offset),
+		PROC_ENTRY(gpufreq_vsram_offset),
 	};
 
 	dir = proc_mkdir("gpufreq", NULL);
@@ -1807,7 +1998,7 @@ static void __mt_gpufreq_apply_volt_offset(int offset_mv)
 	 * springboard table is corrupted — GPU can brown-out on OPP transitions.
 	 * Use __mt_gpufreq_get_vsram_by_target_volt() instead, which is the same
 	 * function used by update_volt() and the aging code, and which correctly
-	 * preserves the g_fixed_vsram_volt threshold entry that cal_sb needs.
+	 * keeps VSRAM on the VGPU relation (see VSRAM_VGPU_DIFF_BASE).
 	 */
 	for (i = 0; i <= max_orig_idx; i++) {
 		g_opp_table[i].gpufreq_vsram =
@@ -2628,16 +2819,17 @@ static int __mt_gpufreq_get_opp_idx_by_volt(unsigned int volt)
  */
 static unsigned int __mt_gpufreq_get_vsram_by_target_volt(unsigned int volt)
 {
-	unsigned int target_vsram;
+	int target_vsram;
 
-	if (volt > g_fixed_vsram_volt_threshold)
-		target_vsram = volt + 10000;
-	else
-		target_vsram = g_fixed_vsram_volt;
+	target_vsram = (int)volt + VSRAM_VGPU_DIFF_BASE +
+			   g_vsram_offset_mv * 100;
+	if (target_vsram < 0)
+		target_vsram = 0;
 
-	gpufreq_pr_debug("@%s: g_fixed_vsram_volt_threshold = %d, g_fixed_vsram_volt = %d, volt = %d, target_vsram = %d\n",
-					 __func__, g_fixed_vsram_volt_threshold,
-				  g_fixed_vsram_volt, volt, target_vsram);
+	target_vsram = VOLT_NORMALIZATION(target_vsram);
+
+	gpufreq_pr_debug("@%s: volt = %d, vsram_offset_mv = %d, target_vsram = %d\n",
+			 __func__, volt, g_vsram_offset_mv, target_vsram);
 	return target_vsram;
 }
 
@@ -2826,6 +3018,11 @@ static void __mt_gpufreq_setup_opp_table(struct g_opp_table_info *freqs, int num
 		g_opp_table_default[i].gpufreq_khz = freqs[i].gpufreq_khz;
 		g_opp_table_default[i].gpufreq_volt = freqs[i].gpufreq_volt;
 		g_opp_table_default[i].gpufreq_vsram = freqs[i].gpufreq_vsram;
+
+		g_opp_table[i].gpufreq_vsram =
+		__mt_gpufreq_get_vsram_by_target_volt(g_opp_table[i].gpufreq_volt);
+		g_opp_table_default[i].gpufreq_vsram =
+		__mt_gpufreq_get_vsram_by_target_volt(g_opp_table_default[i].gpufreq_volt);
 
 		gpufreq_pr_debug("@%s: idx = %u, freq_khz = %u, volt = %u, vsram = %u\n",
 						 __func__, i, freqs[i].gpufreq_khz,
@@ -3226,6 +3423,8 @@ static int __mt_gpufreq_pdrv_probe(struct platform_device *pdev)
 	#ifdef CONFIG_MTK_QOS_SUPPORT
 	mt_gpu_bw_init();
 	#endif
+
+	__mt_gpufreq_apply_boot_offsets();
 
 	return 0;
 }

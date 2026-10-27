@@ -47,6 +47,7 @@ extern unsigned int mt_gpufreq_voltage_enable_set(unsigned int enable);
 extern unsigned int
 mt_gpufreq_update_volt(unsigned int pmic_volt[], unsigned int array_size);
 extern unsigned int mt_gpufreq_get_freq_by_idx(unsigned int idx);
+extern unsigned int mt_gpufreq_get_default_freq_by_idx(unsigned int idx);
 extern unsigned int mt_gpufreq_get_volt_by_idx(unsigned int idx);
 extern void mt_gpufreq_thermal_protect(unsigned int limited_power);
 extern void mt_gpufreq_restore_default_volt(void);

@@ -54,6 +54,7 @@ extern unsigned int mt_gpufreq_update_volt(unsigned int pmic_volt[], unsigned in
 extern unsigned int mt_gpufreq_get_freq_by_real_idx(unsigned int idx);
 extern unsigned int mt_gpufreq_get_volt_by_real_idx(unsigned int idx);
 extern unsigned int mt_gpufreq_get_freq_by_idx(unsigned int idx);
+extern unsigned int mt_gpufreq_get_default_freq_by_idx(unsigned int idx);
 extern unsigned int mt_gpufreq_get_volt_by_idx(unsigned int idx);
 extern unsigned int mt_gpufreq_get_ori_opp_idx(unsigned int idx);
 extern struct mt_gpufreq_power_table_info *pass_gpu_table_to_eara(void);
@@ -98,5 +99,8 @@ extern void mt_gpufreq_input_boost_notify_registerCB(gpufreq_input_boost_notify 
  * GED_SKI_SUPPORT
  */
 extern int mt_gpufreq_get_immed_gpu_temp(void);
+
+extern int gpufreq_set_volt_offset(int mv);
+extern int gpufreq_set_freq_offset(int mhz);
 
 #endif /* _MT_GPUFREQ_H_ */
